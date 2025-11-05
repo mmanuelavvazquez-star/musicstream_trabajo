@@ -72,7 +72,6 @@ LIMIT 100;
 
 SELECT * FROM User_Free
 
-SELECT * FROM User_Free 
 
 -- =============================================================
 -- 3️⃣ USER_PREMIUM (100 registros)
@@ -199,6 +198,8 @@ FROM generate_series(1, 100) AS g;
 
 SELECT * FROM artist;
 
+
+
 -- =============================================================
 -- 7️⃣ ALBUM (100 registros)
 -- =============================================================
@@ -213,6 +214,7 @@ SELECT
     (30 + (g % 20))
 FROM generate_series(1, 100) AS g;
 
+SELECT * FROM album
 -- =============================================================
 -- 8️⃣ SONG (300 registros)
 -- =============================================================
@@ -270,6 +272,10 @@ FROM (
 ) a
 CROSS JOIN LATERAL generate_series(1, (5 + floor(random() * 10))::int) AS s;
 SELECT * FROM song;
+
+
+
+
 -- =============================================================
 -- 🔟 ALBUM_ARTIST (100 registros)
 -- =============================================================
@@ -407,6 +413,95 @@ LEFT JOIN LATERAL (
 CROSS JOIN LATERAL generate_series(1, (3 + floor(random() * 8))::int) AS s;
 
 SELECT * FROM play_history
+
+DELETE FROM play_history;
+
+
+
+WITH song_counts AS (
+    SELECT
+        song_id,
+        song_duration,
+        (5 + floor(random() * 11))::int AS num_reproductions
+    FROM song
+)
+INSERT INTO play_history (
+    playback_id, user_id, song_id, device_id, playlist_id, play_date, duration_played, completed
+)
+SELECT
+    'PH' || lpad(nextval('bd030_schema21.play_history_seq')::text, 7, '0') AS playback_id,
+    u.user_id,
+    s.song_id,
+    d.device_id,
+    CASE WHEN random() < 0.6 THEN p.playlist_id ELSE NULL END AS playlist_id,
+    (current_date - (floor(random() * 365))::int) AS play_date,
+    ROUND((s.song_duration * (0.5 + random() * 0.5))::numeric, 2) AS duration_played,
+    (random() < 0.8) AS completed
+FROM song_counts s
+-- Aquí sí: cada canción usa su propio número aleatorio
+CROSS JOIN generate_series(1, s.num_reproductions) g
+-- Usuario aleatorio
+JOIN LATERAL (
+    SELECT user_id FROM users ORDER BY random() LIMIT 1
+) u ON TRUE
+-- Dispositivo aleatorio
+JOIN LATERAL (
+    SELECT device_id FROM device ORDER BY random() LIMIT 1
+) d ON TRUE
+-- Playlist aleatoria
+LEFT JOIN LATERAL (
+    SELECT playlist_id FROM playlist WHERE user_id = u.user_id ORDER BY random() LIMIT 1
+) p ON TRUE;
+
+
+
+CREATE SEQUENCE bd030_schema21.play_history_seq START 1;
+
+INSERT INTO play_history (
+    playback_id, user_id, song_id, device_id, playlist_id, play_date, duration_played, completed
+)
+SELECT
+    'PH' || lpad(nextval('play_history_seq')::text, 7, '0') AS playback_id,  -- usa una secuencia para IDs únicos
+    u.user_id,
+    s.song_id,
+    d.device_id,
+    CASE WHEN random() < 0.6 THEN p.playlist_id ELSE NULL END AS playlist_id,
+    (current_date - (floor(random() * 365))::int) AS play_date,
+    ROUND((s.song_duration * (0.5 + random() * 0.5))::numeric, 2) AS duration_played,
+    (random() < 0.8) AS completed
+FROM users u
+-- Cada usuario se combina con un subconjunto aleatorio de canciones (entre 3 y 10)
+JOIN LATERAL (
+    SELECT song_id, song_duration
+    FROM song
+    ORDER BY random()
+    LIMIT (3 + floor(random() * 8))::int
+) s ON TRUE
+-- Un dispositivo aleatorio por reproducción
+JOIN LATERAL (
+    SELECT device_id FROM device ORDER BY random() LIMIT 1
+) d ON TRUE
+-- Una playlist aleatoria del usuario (si tiene)
+LEFT JOIN LATERAL (
+    SELECT playlist_id FROM playlist WHERE user_id = u.user_id ORDER BY random() LIMIT 1
+) p ON TRUE;
+
+
+
+SELECT 
+    s.song_id,
+    s.song_title,
+    COUNT(ph.playback_id) AS total_reproductions
+FROM play_history ph
+JOIN song s ON ph.song_id = s.song_id
+GROUP BY s.song_id, s.song_title
+ORDER BY total_reproductions DESC;
+
+
+SELECT COUNT(*) FROM SONG;
+
+
+SELECT * FROM bd030_schema21.play_history;
 
 -- =============================================================
 -- ✅ FIN DEL SCRIPT
