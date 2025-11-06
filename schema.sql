@@ -283,6 +283,26 @@ VALUES ('S_ERR1', 'Canción muy corta', 0.05, '2023-01-01', 0, TRUE);
 
 
 
+-- NORA: Trigger para actualizar play_count al reproducir una cancion
+
+CREATE OR REPLACE FUNCTION update_song_play_count()
+RETURNS TRIGGER AS $$
+BEGIN
+    UPDATE song 
+    SET play_count = play_count + 1 --Incrementamos contador de repros de la cancion
+    WHERE song_id = NEW.song_id;
+    
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Creamos trigger después de que se inserten datos en play_history (cada vez q se actualiza el historial de reproduccion, el atributo play_count de dicha cancion aumenta por 1)
+CREATE TRIGGER trg_update_song_play_count
+AFTER INSERT ON play_history 
+FOR EACH ROW
+EXECUTE FUNCTION update_song_play_count();
+
+
 
 
 
