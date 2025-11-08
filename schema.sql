@@ -302,6 +302,21 @@ AFTER INSERT ON play_history
 FOR EACH ROW
 EXECUTE FUNCTION update_song_play_count();
 
+-- NORA: mi switch 
+CREATE VIEW top_10_songs AS
+SELECT 
+    s.song_id,
+    s.song_title,
+    s.play_count,
+    a.artist_name,
+    s.song_duration
+FROM song s
+JOIN song_artist sa ON s.song_id = sa.song_id
+JOIN artist a ON sa.artist_id = a.artist_id
+ORDER BY s.play_count DESC
+LIMIT 10;
+
+
 
 
 
