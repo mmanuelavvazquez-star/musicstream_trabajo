@@ -1,0 +1,189 @@
+
+-- INTERROGAÇOES
+-- 1) Interrogation for users that listen to 3 or more different genres
+SELECT 
+    users.user_id,
+    users.user_nick,
+    COUNT(DISTINCT genre.genre_id) AS dif_genres -- Function that counts all of the distinct genre IDs (we want to know the total number of genres listened per user)
+FROM users 
+JOIN play_history AS play ON users.user_id = play.user_id
+JOIN song_genre AS sgenre ON play.song_id = sgenre.song_id
+JOIN genre ON sgenre.genre_id = genre.genre_id -- A series of inner joins in order to connect users with their play history and the relationships song_genre and genre
+GROUP BY users.user_id, users.user_nick -- Group the results by users
+HAVING COUNT(DISTINCT genre.genre_id) > 3 -- We filter to only show those cases in which the user has listened to >3 genres
+ORDER BY dif_genres DESC;
+
+-- 2) Interrogation that checks if a song is added to more playlists than the average song
+SELECT 
+    s.song_id,
+    s.song_title,
+    COUNT(DISTINCT playh.playlist_id) AS total_playlists -- We count the different playlist IDs for every song
+FROM song AS s
+JOIN play_history AS playh ON s.song_id = playh.song_id -- We join songs and play_history in a table through an inner join
+WHERE playh.playlist_id IS NOT NULL
+GROUP BY s.song_id, s.song_title -- Because we want to count playlists per song, we group by songs
+HAVING COUNT(DISTINCT playh.playlist_id) > ( 
+    SELECT AVG(playlist_count) -- In this subquery we are calculating the average number of playlists per song
+    FROM ( 
+        SELECT COUNT(DISTINCT playlist_id) as playlist_count
+        FROM play_history 
+        WHERE playlist_id IS NOT NULL
+        GROUP BY song_id
+    ) AS avg_playlists
+)
+ORDER BY total_playlists DESC; -- Order from most to least popular song in playlists
+
+-- 3) Interrogation that selects artists with at least one song in the top 50 most listened global songs
+SELECT 
+    artist.artist_name,
+    s.song_title,
+    s.song_id
+FROM artist
+JOIN song_artist AS sa ON artist.artist_id = sa.artist_id
+JOIN ( -- subquery that creates a table with the 50 most listened songs on the platform
+    SELECT song_id, song_title 
+    FROM song 
+    ORDER BY play_count DESC 
+    LIMIT 50
+) s ON sa.song_id = s.song_id
+ORDER BY artist.artist_name, s.song_title;
+
+-- 4) Interrogation that looks for albums that are collaborations between 2 artists or more
+SELECT 
+    album.album_id,
+    album.album_name,
+    COUNT(DISTINCT aa.artist_id) AS total_artistas -- This counts each artist once per album (thus, this results in the unique number of artists per album)
+FROM album
+JOIN album_artist AS aa ON album.album_id = aa.album_id
+JOIN artist ON aa.artist_id = artist.artist_id
+GROUP BY album.album_id, album.album_name -- We group in order to count the artists for each of the albums
+HAVING COUNT(DISTINCT aa.artist_id) > 1 -- Only keep albums that have more than one artist associated
+ORDER BY total_artistas DESC, album.album_name;
+
+-- 5) Interrogation that selects users that listen to music from 1 unique country
+SELECT 
+    users.user_id,
+    users.user_nick,
+    users.country,
+    COUNT(DISTINCT artist.artist_country) AS listened_countries, -- Counts the number of different artist countries the user has listened to
+    COUNT(playh.playback_id) AS total_plays -- Number of song plays per user
+FROM users
+JOIN play_history AS playh ON users.user_id = playh.user_id
+JOIN song ON playh.song_id = song.song_id
+JOIN song_artist AS sa ON song.song_id = sa.song_id
+JOIN artist ON sa.artist_id = artist.artist_id
+GROUP BY users.user_id, users.user_nick, users.country 
+HAVING COUNT(DISTINCT artist.artist_country) = 1 -- Looking only for those who listen to music from 1 exact country
+ORDER BY total_plays DESC;
+
+-- 6) Interrogation that select genres with more than 5 different artists
+SELECT 
+    genre.genre_name,
+    COUNT(DISTINCT sa.artist_id) AS different_artists, -- Counts how many artists have songs in this genre (unique)
+    COUNT(DISTINCT song.song_id) AS total_songs -- Counts how many songs belong to this genre (unique songs)
+FROM genre
+JOIN song_genre AS sg ON genre.genre_id = sg.genre_id
+JOIN song ON sg.song_id = song.song_id
+JOIN song_artist AS sa ON song.song_id = sa.song_id
+GROUP BY genre.genre_name
+HAVING COUNT(DISTINCT sa.artist_id) > 5 -- We only consider genres with > 5 artists
+ORDER BY different_artists DESC; -- We order from most to least diversity
+
+-- 7) Interrogation that looks for singles (belonging to an album) with over 10000 plays
+SELECT 
+    song.song_id,
+    song.song_title,
+    album.album_name,
+    song.is_single,
+    song.play_count
+FROM song
+JOIN album ON song.album_id = album.album_id -- Inner join connecting songs to their album
+WHERE song.is_single = TRUE -- We only consider singles that belong to some album and have more than 10000 plays
+  AND song.album_id IS NOT NULL
+  AND song.play_count > 10000
+ORDER BY song.play_count DESC; -- Orderd from highest to lowest play count
+
+
+--TRIGGER
+--Trigger that updates play_count every time a song is played
+CREATE OR REPLACE FUNCTION update_song_play_count()
+RETURNS TRIGGER AS $$
+BEGIN
+    UPDATE song 
+    SET play_count = play_count + 1 -- Function that adds one value to play_count every time the trigger is activated
+    WHERE song_id = NEW.song_id; -- new.song_id is used to monitor the song which was most recently played
+    
+    RETURN new;
+END;
+$$ LANGUAGE plpgsql;
+-- The trigger is created after the data is added into play_history (every time there is an update in the play history, the attribute play_count dassociated to that song increases by 1)
+CREATE TRIGGER trg_update_song_play_count -- Activation right after a new insert in play_history
+AFTER INSERT ON play_history 
+FOR EACH ROW
+EXECUTE FUNCTION update_song_play_count();
+
+
+--VIEW
+--View that shows the top 50 most reproduced songs
+CREATE VIEW top_50_songs AS
+SELECT 
+    song.song_id,
+    song.song_title,
+    song.play_count,
+    artist.artist_name,
+    song.song_duration
+FROM song 
+JOIN song_artist AS sa ON song.song_id = sa.song_id 
+JOIN artist ON sa.artist_id = artist.artist_id
+ORDER BY song.play_count DESC -- Order from highest to lowest play count
+LIMIT 50; -- We only show the top 50 results
+
+
+--STORES PROCEDURES / FUNCTIONS
+-- 1) Function that shows all songs from a specific artist
+CREATE OR REPLACE FUNCTION songs_by_artist(nombre_artista VARCHAR)
+RETURNS TABLE(
+    song_title VARCHAR, 
+    song_duration NUMERIC,
+    album_name VARCHAR
+) AS $$
+BEGIN
+    RETURN QUERY
+    SELECT song.song_title, song.song_duration, album.album_name
+    FROM song
+    JOIN song_artist AS sa ON song.song_id = sa.song_id -- Connect songs to their artists
+    JOIN artist ON sa.artist_id = artist.artist_id -- Connect to artist table
+    LEFT JOIN album ON song.album_id = album.album_id -- In this case we are using the LEFT JOIN in order to also includes those songs that don't belong to an album
+    WHERE artist.artist_name = nombre_artista
+    ORDER BY song.song_title;
+END;
+$$ LANGUAGE plpgsql;
+-- Example of function usage
+SELECT * FROM songs_by_artist('Coldplay');
+
+-- 2) Function that shows the user's favourite (most listened) artist
+CREATE OR REPLACE FUNCTION user_top_artists(id_usuario VARCHAR)
+RETURNS TABLE(
+    artista VARCHAR,
+    listened_songs BIGINT,
+    total_mins NUMERIC
+) AS $$
+BEGIN
+    RETURN QUERY
+    SELECT 
+        artist.artist_name AS artista,
+        COUNT(DISTINCT playh.song_id) AS listened_songs, -- We count how many distinct songs the userr has listened to from this artist
+        ROUND(SUM(playh.duration_played), 2) AS total_mins -- Sum of total minutes listened to this artist (rounded to 2 decimal marks)
+    FROM play_history AS playh -- Series of joins to create a table containing information from multiple tables:
+    JOIN song ON playh.song_id = song.song_id
+    JOIN song_artist AS sa ON song.song_id = sa.song_id
+    JOIN artist ON sa.artist_id = artist.artist_id
+    WHERE playh.user_id = id_usuario
+    GROUP BY artist.artist_name -- In order to calculate statistics per artist, we group by artists
+    ORDER BY total_mins DESC -- Order from most to least listened minutes
+    LIMIT 5; -- We only show the top 5 artists
+END;
+$$ LANGUAGE plpgsql;
+
+-- Example of use of function
+SELECT * FROM user_top_artists('U001');
