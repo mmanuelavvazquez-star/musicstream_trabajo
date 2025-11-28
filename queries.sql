@@ -20,7 +20,7 @@ ORDER BY plays_this_month DESC
 -- Limit the result to the top 5 most played songs
 LIMIT 5;
 
---1 (OPTIMIZADA)
+--1 (Opt)
 SELECT 
     s.song_title,
     COUNT(*) AS plays_this_month
@@ -31,7 +31,7 @@ WHERE ph.play_date >= DATE_TRUNC('month', CURRENT_DATE)
 GROUP BY s.song_title
 ORDER BY plays_this_month DESC
 LIMIT 5;
---We improved the code by comparing date ranges instead of truncating
+--We optimized the code by comparing date ranges and improving join syntax
 
 --2
 -- Select users who have not played any songs in the last 30 days
@@ -45,10 +45,10 @@ GROUP BY u.user_id
 HAVING MAX(ph.play_date) < CURRENT_DATE - INTERVAL '30 days' 
        OR MAX(ph.play_date) IS NULL;
 
---2(REESCRITA COMO TRANSACCIÓN)
+--2(Rewriting as a transaction)
 BEGIN;
 
--- Crear tabla temporal con los usuarios inactivos
+-- Temporal table with inactive users
 CREATE TEMP TABLE temp_inactive_users AS
 SELECT u.user_id, u.user_nick
 FROM users u
@@ -72,6 +72,18 @@ GROUP BY g.genre_name
 -- Order the results by average duration in descending order (longest first)
 ORDER BY avg_duration DESC;
 
+--3(Opt)
+SELECT 
+    g.genre_name, 
+    ROUND(AVG(s.song_duration), 2) AS avg_duration
+FROM genre g
+INNER JOIN song_genre sg ON g.genre_id = sg.genre_id
+INNER JOIN song s ON sg.song_id = s.song_id
+WHERE s.song_duration IS NOT NULL  -- Filtrar antes de agregación
+GROUP BY g.genre_name
+ORDER BY avg_duration DESC;
+-- We optimized by changing the order of the join to begin with the smallest table
+
 --4
 -- Count the number of playlists created by users in each country
 SELECT u.country, COUNT(p.playlist_id) AS total_playlists
@@ -83,10 +95,9 @@ GROUP BY u.country
 -- Order the results by total number of playlists in descending order
 ORDER BY total_playlists DESC;
 
---4(REESCRITA COMO TRANSACCIÓN)
+--4(Rewriting as a transaction)
 BEGIN;
 
--- . Crear tabla temporal con el resultado de la consulta
 CREATE TEMP TABLE temp_playlists_by_country AS
 SELECT 
     u.country,
@@ -156,6 +167,30 @@ GROUP BY u.country, s.song_title
 -- DISTINCT ON ensures only the top song per country is selected
 ORDER BY u.country, play_count DESC;
 
+--8(Opt)
+WITH song_plays_by_country AS (
+    SELECT 
+        u.country,
+        s.song_id,
+        s.song_title,
+        COUNT(*) AS play_count,  -- COUNT(*) más eficiente
+        -- ROW_NUMBER garantiza una sola fila por país
+        ROW_NUMBER() OVER (PARTITION BY u.country ORDER BY COUNT(*) DESC, s.song_title) AS rn
+    FROM play_history ph
+    INNER JOIN users u ON ph.user_id = u.user_id
+    INNER JOIN song s ON ph.song_id = s.song_id
+    WHERE u.country IS NOT NULL  -- Filtrar países nulos
+    GROUP BY u.country, s.song_id, s.song_title
+)
+SELECT 
+    country,
+    song_title,
+    play_count
+FROM song_plays_by_country
+WHERE rn = 1  -- Solo la canción #1 de cada país
+ORDER BY country;
+--We used Common Table Expression(CTE) to calculate once and filter, also we avoid re-scaning
+
 
 --9
 -- Select users and play dates where they listened to at least 3 different artists
@@ -170,6 +205,19 @@ INNER JOIN song_artist sa ON sa.song_id = ph.song_id
 GROUP BY ph.user_id, ph.play_date
 -- Only include records where the user listened to 3 or more distinct artists
 HAVING COUNT(DISTINCT sa.artist_id) >= 3;
+
+--9(Opt)
+SELECT 
+    ph.user_id,
+    ph.play_date,
+    COUNT(DISTINCT sa.artist_id) AS distinct_artists
+FROM play_history ph
+INNER JOIN song_artist sa ON ph.song_id = sa.song_id
+WHERE ph.play_date IS NOT NULL  -- Filtrar antes de agregar
+GROUP BY ph.user_id, ph.play_date
+HAVING COUNT(DISTINCT sa.artist_id) >= 3
+ORDER BY ph.play_date DESC, distinct_artists DESC;
+-- We eliminated NULL dates and used EXISTS instead of JOIN when possible 
 
 
 --10
@@ -226,7 +274,7 @@ GROUP BY s.song_title
 ORDER BY total_plays DESC;
 
 
---11 (OPTIMIZADA) 
+--11 (Opt) 
 WITH stats AS (
     SELECT 
         u.country,
@@ -246,7 +294,7 @@ SELECT
 FROM stats
 ORDER BY avg_minutes DESC;
 
---AVG() y SUM() solo se calculan una vez.El ORDER BY no recalcula funciones. El CTE permite paralelización del plan de ejecución.
+--We changed the code so AVG and SUM only are calculated once and CTE is used.
 
 
 --12
@@ -268,7 +316,7 @@ WHERE s.song_title = 'Selena Gomez 44'
 -- Order by play date in descending order (most recent plays first)
 ORDER BY ph.play_date DESC;
 
---12 (OPTIMIZADA) 
+--12 (Opt) 
 SELECT
     s.song_title,
     u.user_nick,
@@ -283,7 +331,7 @@ JOIN users u
     ON ph.user_id = u.user_id
 WHERE s.song_title = 'Selena Gomez 44'
 ORDER BY ph.play_date DESC;
---Quitamos DISTINCT → gran mejora en big datasets. Empezamos por song (filtro más selectivo). Evita sort cost en operaciones internas. Permite paralelizar el join.
+--We eliminated DISTINCT and started filtering by the most restrictive condition
 
 --13
 -- Calculate total listening time by device type and user subscription type
@@ -332,27 +380,6 @@ ORDER BY playlists_count DESC
 -- Limit to top 10 artists
 LIMIT 10;
 
-
-
---14 (OPTIMIZADA)
-SELECT 
-    a.artist_id,
-    a.artist_name,
-    COUNT(DISTINCT ps.playlist_id) AS playlist_count,
-    COUNT(DISTINCT s.song_id) AS songs_in_playlists
-FROM artist a
-JOIN song s 
-    ON s.song_artist = a.artist_id
-JOIN playlist_song ps 
-    ON ps.song_id = s.song_id
-GROUP BY a.artist_id, a.artist_name
-ORDER BY playlist_count DESC
-LIMIT 10;
---Se agrupa por artist_id → reduce colisiones de nombres. Se eliminan joins innecesarios. Se minimizan DISTINCT. 
---Se estructuran los JOIN en el orden más eficiente: artist → más pequeño .song → cardinalidad media. 
---playlist_song → cardinalidad alta Preparada para paralelización de agregados. Evita leer la tabla playlist porque NO aporta ninguna columna.
-
-
 --15
 -- Select the top 10 songs played by users from the most unique countries
 SELECT 
@@ -371,18 +398,6 @@ ORDER BY unique_countries DESC
 -- Limit to top 10 songs
 LIMIT 10;
 
---15 (OPTIMIZADA)
-SELECT 
-    s.song_id,
-    s.song_title,
-    COUNT(DISTINCT u.country) AS unique_countries
-FROM play_history ph
-JOIN users u ON ph.user_id = u.user_id
-JOIN song s ON ph.song_id = s.song_id
-GROUP BY s.song_id, s.song_title
-ORDER BY unique_countries DESC
-LIMIT 10;
---song_id en group by → reduce colisiones y coste hash. Evitas flattening de texto largo en agregación. Plan más estable para grandes cantidades de datos.
 
 --16
 -- Select users whose nickname contains 'a', email ends with '.com', and date of birth is within a range
@@ -447,7 +462,7 @@ HAVING AVG(s.song_duration) IS NOT NULL
 -- Order results by average duration in descending order (longest average first)
 ORDER BY avg_duration DESC;
 
---19 (OPTIMIZADA)
+--19 (Opt)
 SELECT 
     a.album_type,
     ROUND(AVG(s.song_duration), 2) AS avg_duration
@@ -455,7 +470,7 @@ FROM album a
 JOIN song s ON s.album_id = a.album_id
 GROUP BY a.album_type
 ORDER BY avg_duration DESC;
---HAVING eliminado → innecesario (AVG nunca es NULL si existen canciones).Join order invertido → más eficiente por cardinalidad.
+--We eliminated HAVING because AVG is never NULL if ther are songs and inverted JOIN order to be more efficient
 
 
 --20
@@ -477,7 +492,7 @@ WHERE s.play_count > (
 ORDER BY s.play_count DESC;
 
 
---20 (OPTIMIZADA)
+--20 (Opt)
 SELECT 
     s.song_title,
     s.play_count,
@@ -491,158 +506,175 @@ FROM (
 JOIN album a ON s.album_id = a.album_id
 WHERE s.play_count > s.album_avg
 ORDER BY s.play_count DESC;
---AVG() se calcula una sola vez por album, no por fila → gigantesca mejora.window function permite ejecución paralela. no requiere DISTINCT porque no hay duplicados.
+--AVG is only calculated once for album instead of each row
 
+--NOTE: symbols $variable are PLACEHOLDERS 
 
--- 21(TRANSACCIÓN): registrar una reproducción y actualizar contador
+--21(Transaction): register a song playback(TRIGGER 6 automatically updates play_count, so we only need INSERT)
 BEGIN;
 
--- 1) Registrar reproducción
-INSERT INTO play_history (playback_id, user_id, song_id, device_id, play_date, duration_played)
-VALUES (gen_random_uuid(), $user, $song, $device, NOW(), $duration);
-
--- 2) Actualizar contador global de la canción
-UPDATE song
-SET play_count = play_count + 1
-WHERE song_id = $song;
+-- Insert the playback record
+INSERT INTO play_history (
+    playback_id, 
+    user_id, 
+    song_id, 
+    device_id, 
+    play_date, 
+    duration_played, 
+    completed
+)
+VALUES (
+    $playback_id,   
+    $user_id,       
+    $song_id,       
+    $device_id,      
+    NOW(),           
+    $duration,       
+    $completed       --Bool
+);
 
 COMMIT;
 
 
-
---22(TRANSACCIÓN): Crear playlist y añadir canciones
+--22(Transaction): Create a new playlist
 BEGIN;
 
--- Crear la playlist
-INSERT INTO playlist (playlist_id, playlist_title, playlist_description, user_id)
-VALUES (gen_random_uuid(), $title, $description, $user);
-
--- Añadir canciones
-INSERT INTO playlist_song (playlist_id, song_id)
-VALUES 
-    ($playlist, $song1),
-    ($playlist, $song2),
-    ($playlist, $song3);
+-- Create the playlist
+INSERT INTO playlist (
+    playlist_id,
+    playlist_title,
+    playlist_description,
+    total_songs,
+    playlist_duration,
+    cover_photo,
+    user_id
+)
+VALUES (
+    $playlist_id,      
+    $title,            
+    $description,      
+    0,                 -- Initially empty
+    0.00,              -- Initially 0 duration
+    $cover_url,        
+    $user_id           
+);
 
 COMMIT;
 
-
---23(TRANSACCIÓN): actualizar tipo de usuario
+--23(Transaction): Upgrade user from Free to Premium
 BEGIN;
 
--- 1) Eliminar registro previo de usuario free
+--Removes user from free tier
 DELETE FROM user_free
-WHERE user_id = $user;
+WHERE user_id = $user_id;
 
--- 2) Añadir suscripción premium
-INSERT INTO user_premium (user_id, subscription_id, start_date)
-VALUES ($user, $subscription, NOW());
-
--- 3) Actualizar estado en tabla users
-UPDATE users
-SET status = 'Premium'
-WHERE user_id = $user;
-
-COMMIT;
-
---24(TRANSACCIÓN): registrar compra de subscripcion con validacion
-BEGIN;
-
--- 1) Crear relación usuario–suscripción
-INSERT INTO user_premium (user_id, subscription_id, start_date)
-VALUES ($user, $subscription, NOW());
-
--- 2) Actualizar estado del usuario
-UPDATE users
-SET status = 'Premium'
-WHERE user_id = $user;
-
--- 3) Validación artificial: si el pago falla → ROLLBACK
-DO $$
-BEGIN
-    IF $payment_success = FALSE THEN
-        RAISE EXCEPTION 'Payment failure';
-    END IF;
-END $$;
-
-COMMIT;
-
---25(TRANSACCIÓN): generar playlist con recomendaciones automaticas
-BEGIN;
-
--- 1) Crear playlist recomendada para el usuario
-INSERT INTO playlist (playlist_id, playlist_title, playlist_description, user_id)
-VALUES (gen_random_uuid(), 'Your Recommendations', 'Auto-generated playlist', $user);
-
--- 2) Seleccionar canciones recomendadas (basadas en tus criterios reales)
-WITH recommended_songs AS (
-    SELECT s.song_id
-    FROM play_history ph
-    JOIN users u ON u.user_id = ph.user_id
-    JOIN song s ON s.song_id = ph.song_id
-    GROUP BY s.song_id
-    HAVING COUNT(DISTINCT u.country) > 5   -- Canciones internacionales
-    ORDER BY COUNT(*) DESC
-    LIMIT 20                               -- Top 20 recomendadas
+--Adds user to premium tier
+INSERT INTO user_premium (
+    user_id,
+    premium_quality,    
+    download_music,
+    subscription_id
 )
+VALUES (
+    $user_id,          
+    'High Quality',     -- Audio quality level
+    TRUE,               -- Allow downloads
+    $subscription_id
+);
 
--- 3) Insertar las canciones en la playlist
-INSERT INTO playlist_song (playlist_id, song_id)
-SELECT $playlist_id, song_id
-FROM recommended_songs;
-
--- 4) Validación: si la playlist quedó vacía → ROLLBACK
-IF NOT EXISTS (
-    SELECT 1 FROM playlist_song WHERE playlist_id = $playlist_id
+--Creates the subscription plan
+INSERT INTO subscription_plan (
+    subscription_id,
+    user_id,
+    subscription_name,
+    duration_months,
+    price,
+    subscription_status,
+    subscription_description,
+    max_devices
 )
-THEN
-    ROLLBACK;
-ELSE
-    COMMIT;
-END IF;
-
-
---26(TRANSACCIÓN):calcular estadisticas globales
-BEGIN;
-
--- 1) Regenerar estadísticas de canciones del mes
-DELETE FROM monthly_top_songs;
-
-INSERT INTO monthly_top_songs (song_title, plays)
-SELECT 
-    s.song_title,
-    COUNT(*) AS plays_this_month
-FROM play_history ph
-JOIN song s ON ph.song_id = s.song_id
-WHERE DATE_TRUNC('month', ph.play_date) = DATE_TRUNC('month', CURRENT_DATE)
-GROUP BY s.song_title
-ORDER BY plays_this_month DESC
-LIMIT 10;
-
--- 2) Regenerar estadísticas por género
-DELETE FROM genre_avg_duration;
-
-INSERT INTO genre_avg_duration (genre_name, avg_duration)
-SELECT 
-    g.genre_name,
-    AVG(s.song_duration)
-FROM song s
-JOIN genre g ON g.genre_id = s.genre_id
-GROUP BY g.genre_name;
-
--- 3) Regenerar estadísticas internacionales
-DELETE FROM international_songs;
-
-INSERT INTO international_songs (song_title, countries)
-SELECT 
-    s.song_title,
-    COUNT(DISTINCT u.country)
-FROM play_history ph
-JOIN users u ON u.user_id = ph.user_id
-JOIN song s ON s.song_id = ph.song_id
-GROUP BY s.song_title;
+VALUES (
+    $subscription_id,       
+    $user_id,               
+    'Premium Individual',    
+    12,                      -- 12 months
+    9.99,                    -- $9.99/month
+    'Active',                -- Status
+    'Full access with HD quality',
+    5                        -- Max 5 devices
+);
 
 COMMIT;
+
+
+--24(Transaction):Add a new song (If album_id is NULL, song is automatically marked as single by TRIGGER 4)
+BEGIN;
+
+--Inserts the song
+INSERT INTO song (
+    song_id,
+    song_title,
+    song_duration,
+    song_release_date,
+    play_count,
+    is_single,
+    album_id
+)
+VALUES (
+    $song_id,          
+    $title,           
+    5.55,               -- Duration in minutes
+    $release_date,     
+    0,                  -- Initial play count
+    $is_single,         -- Bool
+    $album_id           -- NULL for singles
+);
+
+--Links song to artist or artists
+INSERT INTO song_artist (song_id, artist_id)
+VALUES 
+    ($song_id, $artist_id1),  
+    ($song_id, $artist_id2);  -- Optional
+
+--Links song to genre or genres
+INSERT INTO song_genre (song_id, genre_id)
+VALUES 
+    ($song_id, $genre_id1),   
+    ($song_id, $genre_id2);   -- Optional
+
+COMMIT;
+
+--25(Transaction): Cancel premium subscription
+BEGIN;
+
+-- Deletes premium user record (TRIGGER 3 automatically deletes the subscription_plan record)
+DELETE FROM user_premium
+WHERE user_id = $user_id;
+
+--Adds user to free tier
+INSERT INTO user_free (
+    user_id,
+    stream_quality,
+    adverts_limits,
+    minutes_free
+)
+VALUES (
+    $user_id,           
+    'Standard Quality', 
+    30,                 -- Max 30 ads per session
+    180                 -- 180 minutes free per month
+);
+
+COMMIT;
+
+-- CONCRETE EXAMPLE:
+-- BEGIN;
+-- DELETE FROM user_premium WHERE user_id = 'U00001';
+-- INSERT INTO user_free (user_id, stream_quality, adverts_limits, minutes_free)
+-- VALUES ('U00001', 'Standard Quality', 30, 180);
+-- COMMIT;
+
+
 
 
 
