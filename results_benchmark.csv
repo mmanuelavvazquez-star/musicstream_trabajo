@@ -1,0 +1,14 @@
+Query nº,Query title,Execution time (ms),Cost,Returned rows,Index use (yes/no)
+1,"Top monthly songs",52.916,4006.30,5,No
+2,"Inactive users",188.127,9338.93,65882,No
+3,"Average duration",7.783,597.21,2,No
+4,"Playlists per country",60.829,6318.04,9,No
+5,"Songs played in >5 countries",232.580,21331.54,56,No
+6,"User play count",99.182,14622.20,10004,No
+8,"Most played song per country",83.638,8436.01,10,No
+9,"Dates where user listened to >3 artists",5287.150,3831.60,17574,No
+10,"Average listening duration per user",181.158,18932.67,10,No
+14,"Top 10 artists",293.359,8680.83,10,No
+16,"Users with 'a' in their nickname, email eding in '.com' and within date range",4.337,3840.17,0,No
+18,"Devices registered between two dates",0.052,2.11,15,No
+20,"Songs with higher play count than their avg album",4.182,666.87,2,No
