@@ -20,7 +20,18 @@ ORDER BY plays_this_month DESC
 -- Limit the result to the top 5 most played songs
 LIMIT 5;
 
-
+--1 (OPTIMIZADA)
+SELECT 
+    s.song_title,
+    COUNT(*) AS plays_this_month
+FROM play_history ph
+JOIN song s ON ph.song_id = s.song_id
+WHERE ph.play_date >= DATE_TRUNC('month', CURRENT_DATE)
+  AND ph.play_date < DATE_TRUNC('month', CURRENT_DATE) + INTERVAL '1 month'
+GROUP BY s.song_title
+ORDER BY plays_this_month DESC
+LIMIT 5;
+--We improved the code by comparing date ranges instead of truncating
 
 --2
 -- Select users who have not played any songs in the last 30 days
@@ -34,8 +45,19 @@ GROUP BY u.user_id
 HAVING MAX(ph.play_date) < CURRENT_DATE - INTERVAL '30 days' 
        OR MAX(ph.play_date) IS NULL;
 
+--2(REESCRITA COMO TRANSACCIÓN)
+BEGIN;
 
+-- Crear tabla temporal con los usuarios inactivos
+CREATE TEMP TABLE temp_inactive_users AS
+SELECT u.user_id, u.user_nick
+FROM users u
+LEFT JOIN play_history ph ON u.user_id = ph.user_id
+GROUP BY u.user_id, u.user_nick
+HAVING MAX(ph.play_date) < CURRENT_DATE - INTERVAL '30 days'
+   OR MAX(ph.play_date) IS NULL;
 
+COMMIT;
 
 --3
 -- Calculate the average duration of songs for each genre
@@ -50,9 +72,6 @@ GROUP BY g.genre_name
 -- Order the results by average duration in descending order (longest first)
 ORDER BY avg_duration DESC;
 
-
-
-
 --4
 -- Count the number of playlists created by users in each country
 SELECT u.country, COUNT(p.playlist_id) AS total_playlists
@@ -64,8 +83,20 @@ GROUP BY u.country
 -- Order the results by total number of playlists in descending order
 ORDER BY total_playlists DESC;
 
+--4(REESCRITA COMO TRANSACCIÓN)
+BEGIN;
 
+-- . Crear tabla temporal con el resultado de la consulta
+CREATE TEMP TABLE temp_playlists_by_country AS
+SELECT 
+    u.country,
+    COUNT(p.playlist_id) AS total_playlists
+FROM playlist p
+JOIN users u ON u.user_id = p.user_id
+GROUP BY u.country
+ORDER BY total_playlists DESC;
 
+COMMIT;
 
 --5
 -- Select songs that have been played by users from more than 5 countries
@@ -93,6 +124,7 @@ INNER JOIN play_history ph ON u.user_id = ph.user_id
 GROUP BY u.user_nick
 -- Order the results by total plays in ascending order (least to most)
 ORDER BY total_play ASC;
+
 
 
 --7
@@ -138,8 +170,6 @@ INNER JOIN song_artist sa ON sa.song_id = ph.song_id
 GROUP BY ph.user_id, ph.play_date
 -- Only include records where the user listened to 3 or more distinct artists
 HAVING COUNT(DISTINCT sa.artist_id) >= 3;
-
-
 
 
 --10
@@ -196,6 +226,28 @@ GROUP BY s.song_title
 ORDER BY total_plays DESC;
 
 
+--11 (OPTIMIZADA) 
+WITH stats AS (
+    SELECT 
+        u.country,
+        AVG(ph.duration_played) AS avg_minutes,
+        SUM(ph.duration_played) AS total_minutes,
+        COUNT(*) AS total_plays
+    FROM play_history ph
+    JOIN users u 
+        ON ph.user_id = u.user_id
+    GROUP BY u.country
+)
+SELECT 
+    country,
+    ROUND(avg_minutes, 2) AS avg_minutes,
+    ROUND(total_minutes, 2) AS total_minutes,
+    total_plays
+FROM stats
+ORDER BY avg_minutes DESC;
+
+--AVG() y SUM() solo se calculan una vez.El ORDER BY no recalcula funciones. El CTE permite paralelización del plan de ejecución.
+
 
 --12
 -- Find who has listened to the song "Selena Gomez 44"
@@ -216,7 +268,22 @@ WHERE s.song_title = 'Selena Gomez 44'
 -- Order by play date in descending order (most recent plays first)
 ORDER BY ph.play_date DESC;
 
-
+--12 (OPTIMIZADA) 
+SELECT
+    s.song_title,
+    u.user_nick,
+    u.country,
+    ph.play_date,
+    ph.duration_played,
+    ph.completed
+FROM song s
+JOIN play_history ph 
+    ON ph.song_id = s.song_id
+JOIN users u 
+    ON ph.user_id = u.user_id
+WHERE s.song_title = 'Selena Gomez 44'
+ORDER BY ph.play_date DESC;
+--Quitamos DISTINCT → gran mejora en big datasets. Empezamos por song (filtro más selectivo). Evita sort cost en operaciones internas. Permite paralelizar el join.
 
 --13
 -- Calculate total listening time by device type and user subscription type
@@ -240,7 +307,6 @@ LEFT JOIN user_free uf ON ph.user_id = uf.user_id
 GROUP BY d.device_type, user_type
 -- Order by total minutes played in descending order (most active device/user types first)
 ORDER BY total_minutes_played DESC;
-
 
 
 --14
@@ -268,6 +334,25 @@ LIMIT 10;
 
 
 
+--14 (OPTIMIZADA)
+SELECT 
+    a.artist_id,
+    a.artist_name,
+    COUNT(DISTINCT ps.playlist_id) AS playlist_count,
+    COUNT(DISTINCT s.song_id) AS songs_in_playlists
+FROM artist a
+JOIN song s 
+    ON s.song_artist = a.artist_id
+JOIN playlist_song ps 
+    ON ps.song_id = s.song_id
+GROUP BY a.artist_id, a.artist_name
+ORDER BY playlist_count DESC
+LIMIT 10;
+--Se agrupa por artist_id → reduce colisiones de nombres. Se eliminan joins innecesarios. Se minimizan DISTINCT. 
+--Se estructuran los JOIN en el orden más eficiente: artist → más pequeño .song → cardinalidad media. 
+--playlist_song → cardinalidad alta Preparada para paralelización de agregados. Evita leer la tabla playlist porque NO aporta ninguna columna.
+
+
 --15
 -- Select the top 10 songs played by users from the most unique countries
 SELECT 
@@ -286,6 +371,18 @@ ORDER BY unique_countries DESC
 -- Limit to top 10 songs
 LIMIT 10;
 
+--15 (OPTIMIZADA)
+SELECT 
+    s.song_id,
+    s.song_title,
+    COUNT(DISTINCT u.country) AS unique_countries
+FROM play_history ph
+JOIN users u ON ph.user_id = u.user_id
+JOIN song s ON ph.song_id = s.song_id
+GROUP BY s.song_id, s.song_title
+ORDER BY unique_countries DESC
+LIMIT 10;
+--song_id en group by → reduce colisiones y coste hash. Evitas flattening de texto largo en agregación. Plan más estable para grandes cantidades de datos.
 
 --16
 -- Select users whose nickname contains 'a', email ends with '.com', and date of birth is within a range
@@ -350,6 +447,17 @@ HAVING AVG(s.song_duration) IS NOT NULL
 -- Order results by average duration in descending order (longest average first)
 ORDER BY avg_duration DESC;
 
+--19 (OPTIMIZADA)
+SELECT 
+    a.album_type,
+    ROUND(AVG(s.song_duration), 2) AS avg_duration
+FROM album a
+JOIN song s ON s.album_id = a.album_id
+GROUP BY a.album_type
+ORDER BY avg_duration DESC;
+--HAVING eliminado → innecesario (AVG nunca es NULL si existen canciones).Join order invertido → más eficiente por cardinalidad.
+
+
 --20
 -- Select songs that have a play count higher than the average of their album
 SELECT DISTINCT 
@@ -369,6 +477,172 @@ WHERE s.play_count > (
 ORDER BY s.play_count DESC;
 
 
+--20 (OPTIMIZADA)
+SELECT 
+    s.song_title,
+    s.play_count,
+    a.album_name
+FROM (
+    SELECT 
+        s.*,
+        AVG(s.play_count) OVER (PARTITION BY s.album_id) AS album_avg
+    FROM song s
+) s
+JOIN album a ON s.album_id = a.album_id
+WHERE s.play_count > s.album_avg
+ORDER BY s.play_count DESC;
+--AVG() se calcula una sola vez por album, no por fila → gigantesca mejora.window function permite ejecución paralela. no requiere DISTINCT porque no hay duplicados.
+
+
+-- 21(TRANSACCIÓN): registrar una reproducción y actualizar contador
+BEGIN;
+
+-- 1) Registrar reproducción
+INSERT INTO play_history (playback_id, user_id, song_id, device_id, play_date, duration_played)
+VALUES (gen_random_uuid(), $user, $song, $device, NOW(), $duration);
+
+-- 2) Actualizar contador global de la canción
+UPDATE song
+SET play_count = play_count + 1
+WHERE song_id = $song;
+
+COMMIT;
+
+
+
+--22(TRANSACCIÓN): Crear playlist y añadir canciones
+BEGIN;
+
+-- Crear la playlist
+INSERT INTO playlist (playlist_id, playlist_title, playlist_description, user_id)
+VALUES (gen_random_uuid(), $title, $description, $user);
+
+-- Añadir canciones
+INSERT INTO playlist_song (playlist_id, song_id)
+VALUES 
+    ($playlist, $song1),
+    ($playlist, $song2),
+    ($playlist, $song3);
+
+COMMIT;
+
+
+--23(TRANSACCIÓN): actualizar tipo de usuario
+BEGIN;
+
+-- 1) Eliminar registro previo de usuario free
+DELETE FROM user_free
+WHERE user_id = $user;
+
+-- 2) Añadir suscripción premium
+INSERT INTO user_premium (user_id, subscription_id, start_date)
+VALUES ($user, $subscription, NOW());
+
+-- 3) Actualizar estado en tabla users
+UPDATE users
+SET status = 'Premium'
+WHERE user_id = $user;
+
+COMMIT;
+
+--24(TRANSACCIÓN): registrar compra de subscripcion con validacion
+BEGIN;
+
+-- 1) Crear relación usuario–suscripción
+INSERT INTO user_premium (user_id, subscription_id, start_date)
+VALUES ($user, $subscription, NOW());
+
+-- 2) Actualizar estado del usuario
+UPDATE users
+SET status = 'Premium'
+WHERE user_id = $user;
+
+-- 3) Validación artificial: si el pago falla → ROLLBACK
+DO $$
+BEGIN
+    IF $payment_success = FALSE THEN
+        RAISE EXCEPTION 'Payment failure';
+    END IF;
+END $$;
+
+COMMIT;
+
+--25(TRANSACCIÓN): generar playlist con recomendaciones automaticas
+BEGIN;
+
+-- 1) Crear playlist recomendada para el usuario
+INSERT INTO playlist (playlist_id, playlist_title, playlist_description, user_id)
+VALUES (gen_random_uuid(), 'Your Recommendations', 'Auto-generated playlist', $user);
+
+-- 2) Seleccionar canciones recomendadas (basadas en tus criterios reales)
+WITH recommended_songs AS (
+    SELECT s.song_id
+    FROM play_history ph
+    JOIN users u ON u.user_id = ph.user_id
+    JOIN song s ON s.song_id = ph.song_id
+    GROUP BY s.song_id
+    HAVING COUNT(DISTINCT u.country) > 5   -- Canciones internacionales
+    ORDER BY COUNT(*) DESC
+    LIMIT 20                               -- Top 20 recomendadas
+)
+
+-- 3) Insertar las canciones en la playlist
+INSERT INTO playlist_song (playlist_id, song_id)
+SELECT $playlist_id, song_id
+FROM recommended_songs;
+
+-- 4) Validación: si la playlist quedó vacía → ROLLBACK
+IF NOT EXISTS (
+    SELECT 1 FROM playlist_song WHERE playlist_id = $playlist_id
+)
+THEN
+    ROLLBACK;
+ELSE
+    COMMIT;
+END IF;
+
+
+--26(TRANSACCIÓN):calcular estadisticas globales
+BEGIN;
+
+-- 1) Regenerar estadísticas de canciones del mes
+DELETE FROM monthly_top_songs;
+
+INSERT INTO monthly_top_songs (song_title, plays)
+SELECT 
+    s.song_title,
+    COUNT(*) AS plays_this_month
+FROM play_history ph
+JOIN song s ON ph.song_id = s.song_id
+WHERE DATE_TRUNC('month', ph.play_date) = DATE_TRUNC('month', CURRENT_DATE)
+GROUP BY s.song_title
+ORDER BY plays_this_month DESC
+LIMIT 10;
+
+-- 2) Regenerar estadísticas por género
+DELETE FROM genre_avg_duration;
+
+INSERT INTO genre_avg_duration (genre_name, avg_duration)
+SELECT 
+    g.genre_name,
+    AVG(s.song_duration)
+FROM song s
+JOIN genre g ON g.genre_id = s.genre_id
+GROUP BY g.genre_name;
+
+-- 3) Regenerar estadísticas internacionales
+DELETE FROM international_songs;
+
+INSERT INTO international_songs (song_title, countries)
+SELECT 
+    s.song_title,
+    COUNT(DISTINCT u.country)
+FROM play_history ph
+JOIN users u ON u.user_id = ph.user_id
+JOIN song s ON s.song_id = ph.song_id
+GROUP BY s.song_title;
+
+COMMIT;
 
 
 
